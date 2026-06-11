@@ -30,6 +30,7 @@ RUN --mount=type=cache,target=/root/.nuget \
       -o /build/publish
 
 FROM mcr.microsoft.com/dotnet/runtime-deps:6.0-bookworm-slim
+LABEL org.opencontainers.image.source="https://github.com/hartmanfrost/Sonarr"
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libsqlite3-0 libicu72 curl ca-certificates mediainfo \
     && rm -rf /var/lib/apt/lists/*
