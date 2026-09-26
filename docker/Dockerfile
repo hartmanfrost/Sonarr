@@ -37,6 +37,10 @@ RUN apt-get update \
 WORKDIR /app
 COPY --from=backend /build/publish ./bin
 COPY --from=frontend /build/_output/UI ./bin/UI
+# The cluster runs this image as nobody. ffprobe arrives from its NuGet package
+# as 0744 and publish keeps the mode, so as non-root every media analysis failed
+# with "Permission denied". a+rX grants execute only where some bit already had it.
+RUN chmod -R a+rX /app
 EXPOSE 8989
 VOLUME /config
 ENTRYPOINT ["/app/bin/Sonarr", "-nobrowser", "-data=/config"]
