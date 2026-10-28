@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using NLog;
 using NzbDrone.Common.Extensions;
 using NzbDrone.Common.Instrumentation.Extensions;
@@ -148,31 +149,21 @@ namespace NzbDrone.Core.Parser
             };
 
             // For now we just detect tvdb vs scene, but we can do multiple 'origins' in the future.
-            var sceneSource = true;
-            if (sceneMapping != null)
-            {
-                if (sceneMapping.SeasonNumber.HasValue && sceneMapping.SeasonNumber.Value >= 0 &&
-                    sceneMapping.SceneSeasonNumber <= parsedEpisodeInfo.SeasonNumber)
-                {
-                    remoteEpisode.MappedSeasonNumber += sceneMapping.SeasonNumber.Value - sceneMapping.SceneSeasonNumber.Value;
-                }
-
-                if (sceneMapping.SceneOrigin == "tvdb")
-                {
-                    sceneSource = false;
-                }
-                else if (sceneMapping.Type == "XemService" &&
-                         sceneMapping.SceneSeasonNumber.NonNegative().HasValue &&
-                         parsedEpisodeInfo.SeasonNumber == 1 &&
-                         sceneMapping.SceneSeasonNumber != parsedEpisodeInfo.SeasonNumber)
-                {
-                    remoteEpisode.MappedSeasonNumber = sceneMapping.SceneSeasonNumber.Value;
-                }
-            }
+            var sceneSource = ApplySceneMapping(remoteEpisode, sceneMapping, parsedEpisodeInfo);
 
             if (series == null)
             {
                 var seriesMatch = FindSeries(parsedEpisodeInfo, tvdbId, tvRageId, imdbId, sceneMapping, searchCriteria);
+
+                if (seriesMatch == null && sceneMapping == null)
+                {
+                    seriesMatch = FindSeriesByReleaseSegments(parsedEpisodeInfo, out sceneMapping);
+
+                    if (seriesMatch != null)
+                    {
+                        sceneSource = ApplySceneMapping(remoteEpisode, sceneMapping, parsedEpisodeInfo);
+                    }
+                }
 
                 if (seriesMatch != null)
                 {
@@ -205,6 +196,232 @@ namespace NzbDrone.Core.Parser
             }
 
             return remoteEpisode;
+        }
+
+        private bool ApplySceneMapping(RemoteEpisode remoteEpisode, SceneMapping sceneMapping, ParsedEpisodeInfo parsedEpisodeInfo)
+        {
+            remoteEpisode.SceneMapping = sceneMapping;
+            remoteEpisode.MappedSeasonNumber = parsedEpisodeInfo.SeasonNumber;
+
+            var sceneSource = true;
+
+            if (sceneMapping != null)
+            {
+                if (AnimeAliasProvider.IsSeasonOrigin(sceneMapping.SceneOrigin) && sceneMapping.SeasonNumber.HasValue && sceneMapping.SeasonNumber.Value >= 0)
+                {
+                    // The alias names one specific TVDB season; the tracker's own season number is meaningless for it.
+                    remoteEpisode.MappedSeasonNumber = sceneMapping.SeasonNumber.Value;
+                    sceneSource = false;
+                }
+                else if (sceneMapping.SeasonNumber.HasValue && sceneMapping.SeasonNumber.Value >= 0 &&
+                    sceneMapping.SceneSeasonNumber <= parsedEpisodeInfo.SeasonNumber)
+                {
+                    remoteEpisode.MappedSeasonNumber += sceneMapping.SeasonNumber.Value - sceneMapping.SceneSeasonNumber.Value;
+                }
+
+                if (sceneMapping.SceneOrigin == "tvdb")
+                {
+                    sceneSource = false;
+                }
+                else if (sceneMapping.Type == "XemService" &&
+                         sceneMapping.SceneSeasonNumber.NonNegative().HasValue &&
+                         parsedEpisodeInfo.SeasonNumber == 1 &&
+                         sceneMapping.SceneSeasonNumber != parsedEpisodeInfo.SeasonNumber)
+                {
+                    remoteEpisode.MappedSeasonNumber = sceneMapping.SceneSeasonNumber.Value;
+                }
+            }
+
+            return sceneSource;
+        }
+
+        /// <summary>
+        /// Last resort for tracker-style titles ("Romaji (S2) / English Season 2 [TV] ..."): try each " / " part as a
+        /// whole name, exact CleanSeriesTitle equality only, against the scene mappings and the library. Accepted only
+        /// when every hit is the same series and the release year fits the series' air years.
+        /// </summary>
+        private FindSeriesResult FindSeriesByReleaseSegments(ParsedEpisodeInfo parsedEpisodeInfo, out SceneMapping sceneMapping)
+        {
+            sceneMapping = null;
+
+            var segments = ReleaseSegments.Split(parsedEpisodeInfo.ReleaseTitle);
+
+            if (!segments.Any())
+            {
+                return null;
+            }
+
+            var hitMappings = new List<SceneMapping>();
+            var hitTvdbIds = new HashSet<int>();
+
+            foreach (var segment in segments)
+            {
+                var found = LookupSegmentTerms(segment.AsIs, false, parsedEpisodeInfo, hitMappings, hitTvdbIds);
+
+                if (!found)
+                {
+                    LookupSegmentTerms(segment.WithoutSeasonToken, true, parsedEpisodeInfo, hitMappings, hitTvdbIds);
+                }
+            }
+
+            if (hitTvdbIds.Count != 1)
+            {
+                if (hitTvdbIds.Count > 1)
+                {
+                    _logger.Debug("Release segments of '{0}' match several series, leaving it unknown", parsedEpisodeInfo.ReleaseTitle);
+                }
+
+                return null;
+            }
+
+            var matchedTvdbId = hitTvdbIds.First();
+            var series = _seriesService.FindByTvdbId(matchedTvdbId);
+
+            if (series == null)
+            {
+                return null;
+            }
+
+            sceneMapping = ChooseSceneMapping(hitMappings.Where(m => m.TvdbId == matchedTvdbId).ToList());
+
+            var undoNumbering = RepairNumberingFromSeasonToken(parsedEpisodeInfo);
+
+            // Dry run on a scratch object so a year mismatch leaves the caller's RemoteEpisode untouched.
+            var scratch = new RemoteEpisode { ParsedEpisodeInfo = parsedEpisodeInfo };
+            var sceneSource = ApplySceneMapping(scratch, sceneMapping, parsedEpisodeInfo);
+
+            var episodes = ValidateParsedEpisodeInfo.ValidateForSeriesType(parsedEpisodeInfo, series)
+                ? GetEpisodes(parsedEpisodeInfo, series, scratch.MappedSeasonNumber, sceneSource, null)
+                : new List<Episode>();
+
+            var window = ReleaseYearHelper.GetAirYearWindow(episodes);
+
+            if (window == null)
+            {
+                window = ReleaseYearHelper.GetAirYearWindow(_episodeService.GetEpisodeBySeries(series.Id));
+            }
+
+            if (ReleaseYearHelper.IsOutsideWindow(parsedEpisodeInfo.ReleaseTitle, window))
+            {
+                _logger.Debug("Release '{0}' matched {1} by name but its year is outside the series' air years, leaving it unknown", parsedEpisodeInfo.ReleaseTitle, series);
+                sceneMapping = null;
+                undoNumbering?.Invoke();
+                return null;
+            }
+
+            _logger.Debug("Matched '{0}' to {1} by release segment", parsedEpisodeInfo.ReleaseTitle, series);
+
+            return new FindSeriesResult(series, SeriesMatchType.Alias);
+        }
+
+        private static readonly Regex SeasonTokenRegex = new Regex(@"\(S(?<season>\d{1,2})(?:E(?<from>\d{1,4})(?:-E?(?<to>\d{1,4}))?)?[^)]*\)", RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+        /// <summary>
+        /// "Slime Taoshite 300-nen ... (S2) (2025)" parses as absolute episode 300 because the parser reads the
+        /// digits of the name. When the name is matched by segment and the title carries an explicit "(S2)" or
+        /// "(S01E01-04)" token, that token is the numbering. Returns an action that restores the parse, or null
+        /// when nothing was changed.
+        /// </summary>
+        private static Action RepairNumberingFromSeasonToken(ParsedEpisodeInfo info)
+        {
+            if (!info.IsAbsoluteNumbering || info.SeasonNumber != 0 || info.ReleaseTitle.IsNullOrWhiteSpace())
+            {
+                return null;
+            }
+
+            var token = SeasonTokenRegex.Match(info.ReleaseTitle);
+
+            if (!token.Success)
+            {
+                return null;
+            }
+
+            var name = info.ReleaseTitle.Substring(0, token.Index);
+
+            if (!info.AbsoluteEpisodeNumbers.All(n => Regex.IsMatch(name, $@"(?<!\d){n}(?!\d)")))
+            {
+                return null;
+            }
+
+            var season = info.SeasonNumber;
+            var episodes = info.EpisodeNumbers;
+            var absolute = info.AbsoluteEpisodeNumbers;
+            var fullSeason = info.FullSeason;
+
+            info.SeasonNumber = int.Parse(token.Groups["season"].Value);
+            info.AbsoluteEpisodeNumbers = Array.Empty<int>();
+
+            if (token.Groups["from"].Success)
+            {
+                var from = int.Parse(token.Groups["from"].Value);
+                var to = token.Groups["to"].Success ? int.Parse(token.Groups["to"].Value) : from;
+
+                info.EpisodeNumbers = to >= from && to - from < 500 ? Enumerable.Range(from, to - from + 1).ToArray() : new[] { from };
+                info.FullSeason = false;
+            }
+            else
+            {
+                info.EpisodeNumbers = Array.Empty<int>();
+                info.FullSeason = true;
+            }
+
+            return () =>
+            {
+                info.SeasonNumber = season;
+                info.EpisodeNumbers = episodes;
+                info.AbsoluteEpisodeNumbers = absolute;
+                info.FullSeason = fullSeason;
+            };
+        }
+
+        private bool LookupSegmentTerms(List<string> terms, bool seasonTokenStripped, ParsedEpisodeInfo parsedEpisodeInfo, List<SceneMapping> hitMappings, HashSet<int> hitTvdbIds)
+        {
+            var found = false;
+
+            foreach (var term in terms)
+            {
+                var mappings = _sceneMappingService.FindMappingsByTerm(term, parsedEpisodeInfo.ReleaseTitle, parsedEpisodeInfo.SeasonNumber);
+
+                if (mappings != null)
+                {
+                    // A name that only matched after its season token was cut must not land on an alias that
+                    // itself names a later season ("... 3rd Season" cut to "..." must not hit a season 3 alias).
+                    foreach (var mapping in mappings.Where(m => !seasonTokenStripped || (m.SeasonNumber ?? -1) <= 1))
+                    {
+                        hitMappings.Add(mapping);
+                        hitTvdbIds.Add(mapping.TvdbId);
+                        found = true;
+                    }
+                }
+
+                var libraryMatch = _seriesService.FindByTitle(term);
+
+                if (libraryMatch != null)
+                {
+                    hitTvdbIds.Add(libraryMatch.TvdbId);
+                    found = true;
+                }
+            }
+
+            return found;
+        }
+
+        private static SceneMapping ChooseSceneMapping(List<SceneMapping> mappings)
+        {
+            if (!mappings.Any())
+            {
+                return null;
+            }
+
+            var seasons = mappings.Select(m => m.SeasonNumber).Distinct().ToList();
+
+            if (seasons.Count == 1)
+            {
+                return mappings.First();
+            }
+
+            // The parts disagree on the season: keep the season-agnostic one if there is one, otherwise stay neutral.
+            return mappings.FirstOrDefault(m => !m.SeasonNumber.HasValue && !m.SceneSeasonNumber.HasValue);
         }
 
         public List<Episode> GetEpisodes(ParsedEpisodeInfo parsedEpisodeInfo, Series series, bool sceneSource, SearchCriteriaBase searchCriteria = null)

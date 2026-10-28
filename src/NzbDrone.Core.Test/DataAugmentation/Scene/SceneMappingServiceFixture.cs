@@ -372,6 +372,55 @@ namespace NzbDrone.Core.Test.DataAugmentation.Scene
             Subject.FindTvdbId("Amareto", "Amareto.S01E01.720p.WEB-DL-Viva", 4).Should().Be(101);
         }
 
+        [Test]
+        public void should_find_mappings_by_exact_clean_term_only()
+        {
+            var mappings = new List<SceneMapping>
+            {
+                new SceneMapping { Title = "Guimi Zhi Zhu: Xiaochou Pian", ParseTerm = "guimizhizhuxiaochoupian", SearchTerm = "Lord of Mysteries", TvdbId = 7 }
+            };
+
+            Mocker.GetMock<ISceneMappingRepository>().Setup(c => c.All()).Returns(mappings);
+
+            Subject.FindMappingsByTerm("Guimi Zhi Zhu: Xiaochou Pian", null, -1).Select(m => m.TvdbId).Should().Equal(7);
+            Subject.FindMappingsByTerm("Guimi Zhi Zhu", null, -1).Should().BeEmpty();
+            Subject.FindMappingsByTerm("Guimi Zhi Zhu: Xiaochou Pian Extra", null, -1).Should().BeEmpty();
+            Subject.FindMappingsByTerm(null, null, -1).Should().BeEmpty();
+        }
+
+        [Test]
+        public void should_drop_supplementary_names_that_another_provider_gives_to_a_different_series()
+        {
+            var primary = new List<SceneMapping>
+            {
+                new SceneMapping { Title = "Taken Name", ParseTerm = "takenname", SearchTerm = "Taken Name", TvdbId = 1, Type = "ServicesProvider" }
+            };
+
+            var supplementary = new List<SceneMapping>
+            {
+                new SceneMapping { Title = "Taken Name", SearchTerm = "Other", TvdbId = 2 },
+                new SceneMapping { Title = "Same Series Name", SearchTerm = "Taken Name", TvdbId = 1 },
+                new SceneMapping { Title = "Free Name", SearchTerm = "Other", TvdbId = 2 }
+            };
+
+            var secondary = new Mock<ISceneMappingProvider>();
+            secondary.As<ISupplementarySceneMappingProvider>();
+            secondary.Setup(s => s.GetSceneMappings()).Returns(supplementary);
+
+            var first = new Mock<ISceneMappingProvider>();
+            first.Setup(s => s.GetSceneMappings()).Returns(primary);
+
+            // The supplementary provider is listed first on purpose: it must still run last.
+            GivenProviders(new[] { secondary, first });
+
+            Mocker.GetMock<ISceneMappingRepository>().Setup(c => c.All()).Returns(primary);
+
+            Subject.Execute(new UpdateSceneMappingCommand());
+
+            Mocker.GetMock<ISceneMappingRepository>()
+                  .Verify(c => c.InsertMany(It.Is<List<SceneMapping>>(l => l.Select(m => m.Title).SequenceEqual(new[] { "Same Series Name", "Free Name" }))), Times.Once());
+        }
+
         private void AssertNoUpdate()
         {
             _provider1.Verify(c => c.GetSceneMappings(), Times.Once());

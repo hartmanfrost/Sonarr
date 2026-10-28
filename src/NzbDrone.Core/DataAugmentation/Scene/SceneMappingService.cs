@@ -19,6 +19,7 @@ namespace NzbDrone.Core.DataAugmentation.Scene
         List<SceneMapping> FindByTvdbId(int tvdbId);
         SceneMapping FindSceneMapping(string sceneTitle, string releaseTitle, int sceneSeasonNumber);
         int? GetSceneSeasonNumber(string seriesTitle, string releaseTitle);
+        List<SceneMapping> FindMappingsByTerm(string term, string releaseTitle, int sceneSeasonNumber);
     }
 
     public class SceneMappingService : ISceneMappingService,
@@ -130,17 +131,39 @@ namespace NzbDrone.Core.DataAugmentation.Scene
             return FindSceneMapping(seriesTitle, releaseTitle, -1)?.SceneSeasonNumber;
         }
 
+        public List<SceneMapping> FindMappingsByTerm(string term, string releaseTitle, int sceneSeasonNumber)
+        {
+            if (term.IsNullOrWhiteSpace())
+            {
+                return new List<SceneMapping>();
+            }
+
+            var mappings = FindMappings(term, releaseTitle);
+
+            if (mappings == null)
+            {
+                return new List<SceneMapping>();
+            }
+
+            return FilterSceneMappings(mappings, sceneSeasonNumber);
+        }
+
         private void UpdateMappings()
         {
             _logger.Info("Updating Scene mappings");
 
             _updatedAfterStartup = true;
 
-            foreach (var sceneMappingProvider in _sceneMappingProviders)
+            foreach (var sceneMappingProvider in _sceneMappingProviders.OrderBy(p => p is ISupplementarySceneMappingProvider ? 1 : 0))
             {
                 try
                 {
                     var mappings = sceneMappingProvider.GetSceneMappings();
+
+                    if (sceneMappingProvider is ISupplementarySceneMappingProvider && mappings.Any())
+                    {
+                        mappings = DropNamesClaimedByOtherSeries(mappings, sceneMappingProvider.GetType().Name);
+                    }
 
                     if (mappings.Any())
                     {
@@ -180,6 +203,28 @@ namespace NzbDrone.Core.DataAugmentation.Scene
             RefreshCache();
 
             _eventAggregator.PublishEvent(new SceneMappingsUpdatedEvent());
+        }
+
+        private List<SceneMapping> DropNamesClaimedByOtherSeries(List<SceneMapping> mappings, string ownType)
+        {
+            var claimed = _repository.All()
+                                     .Where(m => m.Type != ownType && m.ParseTerm.IsNotNullOrWhiteSpace())
+                                     .GroupBy(m => m.ParseTerm)
+                                     .ToDictionary(g => g.Key, g => g.Select(m => m.TvdbId).ToHashSet());
+
+            return mappings.Where(m =>
+            {
+                var conflicts = m.Title.IsNotNullOrWhiteSpace() &&
+                                claimed.TryGetValue(m.Title.CleanSeriesTitle(), out var owners) &&
+                                owners.Any(id => id != m.TvdbId);
+
+                if (conflicts)
+                {
+                    _logger.Debug("Skipping scene mapping '{0}' for {1}: the name belongs to another series", m.Title, m.TvdbId);
+                }
+
+                return !conflicts;
+            }).ToList();
         }
 
         private List<SceneMapping> FindMappings(string seriesTitle, string releaseTitle)
