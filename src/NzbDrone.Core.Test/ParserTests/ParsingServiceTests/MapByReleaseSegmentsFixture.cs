@@ -259,7 +259,7 @@ namespace NzbDrone.Core.Test.ParserTests.ParsingServiceTests
         [Test]
         public void should_leave_the_2011_hunter_x_hunter_remake_unknown_for_the_1999_series()
         {
-            var remote = MapTitle("Hunter x Hunter (S2) [TV] [1-12, 14-25, 27-148 148] [RUS(int), JAP] [2011, BDRip]");
+            var remote = MapTitle("HxH Remake (S01E01-04) / Hunter x Hunter [TV] [RUS(int), JAP] [2011, BDRip]");
 
             remote.Series.Should().BeNull();
         }
@@ -267,10 +267,18 @@ namespace NzbDrone.Core.Test.ParserTests.ParsingServiceTests
         [Test]
         public void should_still_match_hunter_x_hunter_when_the_release_year_fits_the_1999_series()
         {
-            var remote = MapTitle("Hunter x Hunter (S2) [TV] [1-12, 14-25, 27-148 148] [RUS(int), JAP] [1999, BDRip]");
+            var remote = MapTitle("HxH Remake (S01E01-04) / Hunter x Hunter [TV] [RUS(int), JAP] [1999, BDRip]");
 
             remote.Series.Should().NotBeNull();
             remote.Series.TvdbId.Should().Be(HunterX1999);
+        }
+
+        [Test]
+        public void should_not_read_a_pack_counter_as_an_absolute_episode_of_a_name_match()
+        {
+            var remote = MapTitle("Lord of Mysteries / Guimi Zhi Zhu: Xiaochou Pian / Повелитель тайн: Шут (13 из 13) Complete [544p]");
+
+            remote.Series.Should().BeNull();
         }
 
         [Test]

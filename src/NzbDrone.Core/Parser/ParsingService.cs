@@ -286,6 +286,14 @@ namespace NzbDrone.Core.Parser
 
             var undoNumbering = RepairNumberingFromSeasonToken(parsedEpisodeInfo);
 
+            // "(13 из 13) Complete" reads as absolute episode 13. Without an explicit season token a name match
+            // is not enough to trust a bare episode number, so such a release stays unknown.
+            if (parsedEpisodeInfo.IsAbsoluteNumbering)
+            {
+                sceneMapping = null;
+                return null;
+            }
+
             // Dry run on a scratch object so a year mismatch leaves the caller's RemoteEpisode untouched.
             var scratch = new RemoteEpisode { ParsedEpisodeInfo = parsedEpisodeInfo };
             var sceneSource = ApplySceneMapping(scratch, sceneMapping, parsedEpisodeInfo);
