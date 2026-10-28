@@ -25,7 +25,7 @@ jobs:
         run: |
           dotnet test src/NzbDrone.Core.Test/Sonarr.Core.Test.csproj \
             -p:SolutionDir=$GITHUB_WORKSPACE/src/ \
-            --filter "FullyQualifiedName~SingleEpisodeSearchMatchSpecificationTests|FullyQualifiedName~ReleaseYearSpecificationFixture|FullyQualifiedName~MapByReleaseSegmentsFixture|FullyQualifiedName~ReleaseSegmentsFixture|FullyQualifiedName~AnimeAliasMapperFixture|FullyQualifiedName~SceneMappingServiceFixture" \
+            --filter "FullyQualifiedName~SingleEpisodeSearchMatchSpecificationTests|FullyQualifiedName~ReleaseYearSpecificationFixture|FullyQualifiedName~MapByReleaseSegmentsFixture|FullyQualifiedName~ReleaseSegmentsFixture|FullyQualifiedName~AnimeAliasMapperFixture|FullyQualifiedName~SceneMappingServiceFixture|FullyQualifiedName~IgnoredDownloadServiceFixture" \
             --logger "console;verbosity=minimal"
 
   build:
